@@ -15,6 +15,7 @@ const id = ref();
 const dateRange = ref("");
 const typeSel = ref();
 const searchQuery = ref("");
+const isExporting = ref(false);
 
 // 🔁 Recuperar estado si viene desde navegación anterior
 const state = router.options.history.state;
@@ -116,6 +117,34 @@ const getSupplierTotal = (items) => {
     currency: "PEN",
   });
 };
+
+const exportAreaOrders = async () => {
+  isExporting.value = true;
+
+  try {
+    const response = await $api.raw('/reports/products/export', {
+      method: 'GET',
+      query: {
+        company,
+        area: id.value,
+        date: dateRange.value,
+        type: typeSel.value,
+      },
+      responseType: 'blob',
+    });
+
+    const url = window.URL.createObjectURL(response._data);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `reporte-area-${company}-${id.value}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  } finally {
+    isExporting.value = false;
+  }
+};
 </script>
 
 <template>
@@ -180,13 +209,23 @@ const getSupplierTotal = (items) => {
     <VCardItem>
       <div class="d-flex justify-space-between align-center flex-wrap gap-4">
         <VCardTitle>Órdenes de compra y servicio</VCardTitle>
-        <VTextField
-          v-model="searchQuery"
-          placeholder="Buscar Proveedor o Producto"
-          density="compact"
-          class="w-100"
-          style="max-inline-size: 250px;"
-        />
+        <div class="d-flex align-center gap-3">
+          <VBtn
+            color="success"
+            prepend-icon="ri-file-excel-2-line"
+            :loading="isExporting"
+            :disabled="isExporting"
+            @click="exportAreaOrders"
+          >
+            Exportar detalle
+          </VBtn>
+          <VTextField
+            v-model="searchQuery"
+            placeholder="Buscar Proveedor o Producto"
+            density="compact"
+            style="max-inline-size: 250px;"
+          />
+        </div>
       </div>
     </VCardItem>
 

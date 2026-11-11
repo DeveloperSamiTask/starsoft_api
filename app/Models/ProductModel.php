@@ -121,6 +121,74 @@ class ProductModel extends Model
         return self::aggregateResults($results);
     }
 
+    /**
+     * Obtiene las líneas sin agrupar para exportar cada OC/OS con su detalle.
+     */
+    public static function getOrdersByAreaForExport(
+        string $connectionName,
+        string $start,
+        string $end,
+        string $area,
+        ?string $responsible = null,
+        ?string $type = null
+    ): Collection {
+        $results = collect();
+
+        foreach (self::getTablesByType($type) as $config) {
+            $header = $config['header'];
+            $detail = $config['detail'];
+            $isService = $config['is_service'];
+
+            $query = DB::connection($connectionName)
+                ->table("{$header} as H")
+                ->join("{$detail} as D", 'H.OC_CNUMORD', '=', 'D.OC_CNUMORD')
+                ->join('MAEPROV as P', 'H.OC_CCODPRO', '=', 'P.PRVCCODIGO')
+                ->join('REQUISC as R', function ($join) use ($config) {
+                    $join->on('H.OC_CNRODOCREF', '=', 'R.NROREQUI')
+                        ->where('R.TIPOREQUI', '=', $config['tiporequi']);
+                })
+                ->leftJoin('AREA as A', 'R.AREA', '=', 'A.AREA_CODIGO')
+                ->leftJoin('RESPONSABLECMP as Resp', 'H.OC_CSOLICT', '=', 'Resp.RESPONSABLE_CODIGO')
+                ->leftJoin('TABAYU as Sol', 'H.OC_SOLICITA', '=', 'Sol.TCLAVE')
+                ->select([
+                    DB::raw("'{$config['order_type']}' as order_type"),
+                    'P.PRVCCODIGO as supplier_ruc',
+                    'P.PRVCNOMBRE as supplier_name',
+                    'H.OC_CNUMORD as order_number',
+                    'H.OC_DFECDOC as issue_date',
+                    'H.OC_DFECENT as delivery_date',
+                    'Sol.TDESCRI as requested_by',
+                    'Resp.RESPONSABLE_NOMBRE as responsible',
+                    'H.OC_COBSERV as observation',
+                    'A.AREA_DESCRIPCION as area_name',
+                    'H.OC_NVENTA as order_total',
+                    'H.OC_NIGV as order_tax',
+                    $isService ? DB::raw('D.OC_CODSERVICIO as product_code') : 'D.OC_CCODIGO as product_code',
+                    $isService ? 'D.OC_CDESREF as product_name' : 'D.OC_CDESREF as product_name',
+                    $isService ? DB::raw("'UND' as unit") : 'D.OC_CUNIDAD as unit',
+                    $isService ? 'D.OC_CANT as quantity' : 'D.OC_NCANTID as quantity',
+                    $isService ? 'D.OC_NPREUNI as unit_price' : 'D.OC_NPREUNI as unit_price',
+                    'D.OC_NIGV as detail_tax',
+                    $isService ? 'D.OC_NPRENET as line_total' : 'D.OC_NTOTNET as line_total',
+                ])
+                ->whereIn('H.OC_CSITORD', ['01', '03', '04'])
+                ->whereBetween('H.OC_DFECDOC', [$start, $end])
+                ->whereRaw('CAST(R.AREA AS INT) = ?', [(int) $area]);
+
+            if ($responsible) {
+                $query->where('H.OC_CSOLICT', $responsible);
+            }
+
+            $results = $results->concat($query
+                ->orderBy('P.PRVCNOMBRE')
+                ->orderBy('H.OC_DFECDOC')
+                ->orderBy('H.OC_CNUMORD')
+                ->get());
+        }
+
+        return $results;
+    }
+
     // ============================================
     // MÉTODOS PRIVADOS (LÓGICA INTERNA)
     // ============================================

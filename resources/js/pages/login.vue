@@ -19,6 +19,11 @@ const errors = ref({
   password: undefined,
 })
 
+const emptyErrors = () => ({
+  email: undefined,
+  password: undefined,
+})
+
 const loading = ref(false)
 
 const refVForm = ref()
@@ -32,6 +37,7 @@ const rememberMe = ref(false)
 
 const login = async () => {
   loading.value = true
+  errors.value = emptyErrors()
   try {
     const res = await $api('auth/login', {
       method: 'POST',
@@ -40,7 +46,10 @@ const login = async () => {
         password: credentials.value.password,
       },
       onResponseError({ response }) {
-        errors.value = response._data.errors
+        errors.value = {
+          ...emptyErrors(),
+          ...(response._data?.errors ?? {}),
+        }
       },
     })
 

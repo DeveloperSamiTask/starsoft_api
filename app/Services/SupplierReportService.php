@@ -62,6 +62,26 @@ class SupplierReportService
     );
   }
 
+  public function getAreaOrdersForExport(
+    string $company,
+    string $area,
+    string $dateRange,
+    ?string $type
+  ): Collection {
+    $conexion = "sqlsrv_{$company}";
+    [$startDate, $endDate] = $this->dateParser->parse($dateRange);
+    $responsible = $this->permissionService->getResponsibleUser($company);
+
+    return ProductModel::getOrdersByAreaForExport(
+      $conexion,
+      $startDate,
+      $endDate,
+      $area,
+      $responsible,
+      $type
+    );
+  }
+
   public function formatResponse(Collection $suppliers, array $filters): array
   {
     return [

@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exports\PurchaseOrdersExport;
+use App\Exports\PurchaseOrdersDetailedExport;
 use App\Http\Controllers\Controller;
 use App\Models\OCModel;
 use App\Models\OCSModel;
@@ -14,6 +16,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
 class OrdersApi extends Controller
 {
@@ -57,6 +60,66 @@ class OrdersApi extends Controller
             return response()->json([
                 'error' => 'Error inesperado al obtener órdenes',
                 'details' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    public function export(Request $request)
+    {
+        try {
+            $query = Orders::query();
+
+            // Exporta todos los registros filtrados, sin modificar la base de datos.
+            $this->applyFilters($query, $request);
+            $this->applySorting($query, $request);
+
+            $orders = $this->formatOrders($query->get()->all());
+            $orders = $this->addExportDetails($orders);
+            $spreadsheet = PurchaseOrdersExport::create($orders);
+
+            return response()->streamDownload(function () use ($spreadsheet) {
+                (new Xlsx($spreadsheet))->save('php://output');
+            }, 'ordenes-starcheck.xlsx', [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('Error en export', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'error' => 'Error inesperado al exportar órdenes',
+            ], 500);
+        }
+    }
+
+    public function exportWithDetails(Request $request)
+    {
+        try {
+            $query = Orders::query();
+
+            // Reutiliza los mismos filtros de la tabla; la consulta es solamente de lectura.
+            $this->applyFilters($query, $request);
+            $this->applySorting($query, $request);
+
+            $orders = $this->formatOrders($query->get()->all());
+            $orders = $this->addDetailedExportData($orders);
+            $spreadsheet = PurchaseOrdersDetailedExport::create($orders);
+
+            return response()->streamDownload(function () use ($spreadsheet) {
+                (new Xlsx($spreadsheet))->save('php://output');
+            }, 'ordenes-starcheck-con-detalle.xlsx', [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('Error en exportWithDetails', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'error' => 'Error inesperado al exportar órdenes con detalle',
             ], 500);
         }
     }
@@ -133,10 +196,17 @@ class OrdersApi extends Controller
                     [$start, $end] = [$end, $start];
                 }
 
-                $query->whereBetween(DB::raw("CONVERT(DATE, fechaGeneracion)"), [$start, $end]);
+                // Evita CONVERT(DATE, fechaGeneracion), que impedía usar índices.
+                $query->whereBetween('fechaGeneracion', [
+                    Carbon::parse($start)->startOfDay(),
+                    Carbon::parse($end)->endOfDay(),
+                ]);
             } else {
                 $date = Carbon::parse(trim($dateRange))->format('Y-m-d');
-                $query->whereDate(DB::raw("CONVERT(DATE, fechaGeneracion)"), $date);
+                $query->whereBetween('fechaGeneracion', [
+                    Carbon::parse($date)->startOfDay(),
+                    Carbon::parse($date)->endOfDay(),
+                ]);
             }
         }
     }
@@ -195,6 +265,203 @@ class OrdersApi extends Controller
                 'pre_approved_by' => $preApproval?->area_manager_name,
             ];
         })->toArray();
+    }
+
+    /**
+     * Agrega al Excel los datos de Starsoft sin modificar ninguna base de datos.
+     */
+    private function addExportDetails(array $orders): array
+    {
+        return array_map(function (array $order): array {
+            $emptyDetails = [
+                'area_code' => '',
+                'area_name' => '',
+                'supplier_ruc' => '',
+                'observation' => '',
+                'unit_type' => '',
+                'amount_without_tax' => null,
+                'tax_amount' => null,
+                'total_amount' => null,
+            ];
+
+            try {
+                $rawCompany = trim((string) ($order['company'] ?? ''));
+                $company = $this->normalizeCompanyCode($rawCompany);
+                $type = $this->normalizeOrderType($order['type'] ?? '');
+                $code = trim((string) ($order['code'] ?? ''));
+
+                if ($rawCompany === '' || $code === '' || !in_array($type, ['OC', 'OS'], true)) {
+                    return [...$order, ...$emptyDetails];
+                }
+
+                $connection = 'sqlsrv_' . $company;
+                $headerTable = $type === 'OS' ? 'COMOVC_S' : 'COMOVC';
+                $detailTable = $type === 'OS' ? 'COMOVD_S' : 'COMOVD';
+                $requirementType = $type === 'OS' ? 'RS' : 'RQ';
+
+                // Consulta de cabecera, requisición y área; es solamente lectura.
+                $header = DB::connection($connection)
+                    ->table("{$headerTable} as H")
+                    ->leftJoin('REQUISC as R', function ($join) use ($requirementType) {
+                        $join->on('H.OC_CNRODOCREF', '=', 'R.NROREQUI')
+                            ->where('R.TIPOREQUI', '=', $requirementType);
+                    })
+                    ->leftJoin('AREA as A', 'R.AREA', '=', 'A.AREA_CODIGO')
+                    ->select([
+                        'H.OC_CCODPRO as supplier_ruc',
+                        'H.OC_COBSERV as observation',
+                        'H.OC_NIMPORT as amount_without_tax',
+                        'H.OC_NIGV as tax_amount',
+                        'H.OC_NVENTA as total_amount',
+                        'R.AREA as area_code',
+                        'A.AREA_DESCRIPCION as area_name',
+                    ])
+                    ->where('H.OC_CNUMORD', $code)
+                    ->first();
+
+                if (!$header) {
+                    return [...$order, ...$emptyDetails];
+                }
+
+                // Servicios usan UND en el sistema; las OC pueden tener varias unidades.
+                $units = $type === 'OS'
+                    ? 'UND'
+                    : DB::connection($connection)
+                        ->table($detailTable)
+                        ->where('OC_CNUMORD', $code)
+                        ->whereNotNull('OC_CUNIDAD')
+                        ->pluck('OC_CUNIDAD')
+                        ->map(fn ($unit) => trim((string) $unit))
+                        ->filter()
+                        ->unique()
+                        ->values()
+                        ->implode(', ');
+
+                return [
+                    ...$order,
+                    'area_code' => trim((string) ($header->area_code ?? '')),
+                    'area_name' => trim((string) ($header->area_name ?? '')),
+                    'supplier_ruc' => trim((string) ($header->supplier_ruc ?? '')),
+                    'observation' => trim((string) ($header->observation ?? '')),
+                    'unit_type' => $units,
+                    'amount_without_tax' => $header->amount_without_tax !== null
+                        ? (float) $header->amount_without_tax
+                        : null,
+                    'tax_amount' => $header->tax_amount !== null
+                        ? (float) $header->tax_amount
+                        : null,
+                    'total_amount' => $header->total_amount !== null
+                        ? (float) $header->total_amount
+                        : null,
+                ];
+            } catch (\Throwable $e) {
+                // Un registro sin tablas relacionadas no debe cancelar todo el Excel.
+                Log::warning('No se pudo enriquecer una orden para exportación', [
+                    'company' => $order['company'] ?? null,
+                    'type' => $order['type'] ?? null,
+                    'code' => $order['code'] ?? null,
+                    'message' => $e->getMessage(),
+                ]);
+
+                return [...$order, ...$emptyDetails];
+            }
+        }, $orders);
+    }
+
+    /**
+     * Carga la cabecera y las líneas de cada orden para el reporte detallado.
+     * No modifica ninguna BD: solo ejecuta consultas SELECT mediante los modelos.
+     */
+    private function addDetailedExportData(array $orders): array
+    {
+        return array_map(function (array $order): array {
+            $emptyDetails = [
+                'supplier_ruc' => '',
+                'supplier_name' => '',
+                'issue_date' => '',
+                'delivery_date' => '',
+                'requested_by' => '',
+                'responsible' => '',
+                'observation' => '',
+                'currency' => '',
+                'amount_without_tax' => null,
+                'tax_amount' => null,
+                'total_amount' => null,
+                'products' => [],
+            ];
+
+            try {
+                $company = $this->normalizeCompanyCode($order['company'] ?? '');
+                $type = $this->normalizeOrderType($order['type'] ?? '');
+                $code = trim((string) ($order['code'] ?? ''));
+
+                if ($company === '' || $code === '' || !in_array($type, ['OC', 'OS'], true)) {
+                    return [...$order, 'detail' => $emptyDetails];
+                }
+
+                // OC y OS usan tablas/modelos distintos, pero entregan la misma estructura al Excel.
+                $starsoftOrder = $type === 'OS'
+                    ? OCSModel::getOrderWithProducts('sqlsrv_' . $company, $code)
+                    : OCModel::getOrderWithProducts('sqlsrv_' . $company, $code);
+
+                if (!$starsoftOrder) {
+                    return [...$order, 'detail' => $emptyDetails];
+                }
+
+                $products = collect($starsoftOrder->products ?? [])
+                    ->values()
+                    ->map(function ($product, int $index) use ($type): array {
+                        $quantity = (float) ($product->OC_NCANTID ?? $product->OC_CANT ?? 0);
+                        $unitPrice = (float) ($product->OC_NPREUNI ?? 0);
+                        $discountPercent = (float) ($product->OC_NDSCPOR ?? 0);
+
+                        // Mantiene la misma fórmula de total que muestra OCDetailDialog.vue.
+                        $lineTotal = $unitPrice * $quantity * (1 - ($discountPercent / 100));
+
+                        return [
+                            'description' => trim((string) ($product->OC_CDESREF ?? '')),
+                            'unit' => $product->OC_CUNIDAD ?? ($type === 'OS' ? 'UND' : ''),
+                            'quantity' => $quantity,
+                            'total' => round($lineTotal, 2),
+                        ];
+                    })
+                    ->all();
+
+                return [
+                    ...$order,
+                    'detail' => [
+                        'supplier_ruc' => trim((string) ($starsoftOrder->OC_CCODPRO ?? '')),
+                        'supplier_name' => trim((string) ($starsoftOrder->OC_CRAZSOC ?? '')),
+                        'issue_date' => $starsoftOrder->OC_DFECDOC ?? '',
+                        'delivery_date' => $starsoftOrder->OC_DFECENT ?? '',
+                        'requested_by' => trim((string) ($starsoftOrder->required?->TDESCRI ?? '')),
+                        'responsible' => trim((string) ($starsoftOrder->responsible?->RESPONSABLE_NOMBRE ?? '')),
+                        'observation' => trim((string) ($starsoftOrder->OC_COBSERV ?? '')),
+                        'currency' => trim((string) ($starsoftOrder->OC_CCODMON ?? '')),
+                        'amount_without_tax' => $starsoftOrder->OC_NIMPORT !== null
+                            ? (float) $starsoftOrder->OC_NIMPORT
+                            : null,
+                        'tax_amount' => $starsoftOrder->OC_NIGV !== null
+                            ? (float) $starsoftOrder->OC_NIGV
+                            : null,
+                        'total_amount' => $starsoftOrder->OC_NVENTA !== null
+                            ? (float) $starsoftOrder->OC_NVENTA
+                            : null,
+                        'products' => $products,
+                    ],
+                ];
+            } catch (\Throwable $e) {
+                // Una orden con datos incompletos no debe cancelar las demás del reporte.
+                Log::warning('No se pudo cargar detalle para exportación', [
+                    'company' => $order['company'] ?? null,
+                    'type' => $order['type'] ?? null,
+                    'code' => $order['code'] ?? null,
+                    'message' => $e->getMessage(),
+                ]);
+
+                return [...$order, 'detail' => $emptyDetails];
+            }
+        }, $orders);
     }
 
     public function getOrder(Request $request)
@@ -372,9 +639,10 @@ class OrdersApi extends Controller
 
             $subQuery->selectRaw('1')
                 ->from($areaMap->getTable() . ' as area_map')
-                ->whereRaw("RIGHT('000' + CAST({$ordersTable}.codigoEmpresa AS VARCHAR(3)), 3) = area_map.codigoEmpresa")
-                ->whereRaw("UPPER(LTRIM(RTRIM(CAST({$ordersTable}.tipo AS VARCHAR(10))))) = area_map.tipo")
-                ->whereRaw("LTRIM(RTRIM(CAST({$ordersTable}.identificador AS VARCHAR(50)))) = area_map.identificador")
+                // Las columnas ya usan el mismo formato en ListadoAprobaciones y la vista.
+                ->whereColumn('area_map.codigoEmpresa', "{$ordersTable}.codigoEmpresa")
+                ->whereColumn('area_map.tipo', "{$ordersTable}.tipo")
+                ->whereColumn('area_map.identificador', "{$ordersTable}.identificador")
                 ->whereIn('area_map.AREA', $areas);
         });
     }
@@ -447,31 +715,63 @@ class OrdersApi extends Controller
 
     private function applyCompositeOrderKeyFilter(Builder $query, array $orderKeys, bool $include): void
     {
-        if ($include) {
-            $query->where(function ($nestedQuery) use ($orderKeys) {
-                foreach ($orderKeys as $orderKey) {
-                    $nestedQuery->orWhere(function ($itemQuery) use ($orderKey) {
-                        $itemQuery->whereRaw("RIGHT('000' + CAST(codigoEmpresa AS VARCHAR(3)), 3) = ?", [$orderKey['company_code']])
-                            ->whereRaw("UPPER(LTRIM(RTRIM(CAST(tipo AS VARCHAR(10))))) = ?", [$orderKey['order_type']]);
+        // Agrupar reduce drásticamente los parámetros: antes se generaban
+        // varias condiciones por cada OC y SQL Server permite como máximo 2100.
+        $groups = [];
 
-                        $this->applyOrderCodeMatch($itemQuery, $orderKey['order_code']);
-                    });
-                }
-            });
-
-            return;
+        foreach ($orderKeys as $orderKey) {
+            $groupKey = $orderKey['company_code'] . '|' . $orderKey['order_type'];
+            $groups[$groupKey]['company_code'] = $orderKey['company_code'];
+            $groups[$groupKey]['order_type'] = $orderKey['order_type'];
+            $groups[$groupKey]['order_codes'][] = $orderKey['order_code'];
         }
 
-        $query->where(function ($nestedQuery) use ($orderKeys) {
-            foreach ($orderKeys as $orderKey) {
-                $nestedQuery->whereNot(function ($itemQuery) use ($orderKey) {
-                    $itemQuery->whereRaw("RIGHT('000' + CAST(codigoEmpresa AS VARCHAR(3)), 3) = ?", [$orderKey['company_code']])
-                        ->whereRaw("UPPER(LTRIM(RTRIM(CAST(tipo AS VARCHAR(10))))) = ?", [$orderKey['order_type']]);
+        $applyGroupedKeys = function ($nestedQuery) use ($groups): void {
+            foreach ($groups as $group) {
+                $numericCodes = [];
+                $textCodes = [];
 
-                    $this->applyOrderCodeMatch($itemQuery, $orderKey['order_code']);
+                foreach (array_unique($group['order_codes']) as $orderCode) {
+                    if (preg_match('/^\d+$/', $orderCode)) {
+                        $numericCodes[] = (int) $orderCode;
+                    } else {
+                        $textCodes[] = $orderCode;
+                    }
+                }
+
+                $nestedQuery->orWhere(function ($itemQuery) use ($group, $numericCodes, $textCodes): void {
+                    $itemQuery->whereRaw(
+                        "RIGHT('000' + CAST(codigoEmpresa AS VARCHAR(3)), 3) = ?",
+                        [$group['company_code']],
+                    )->whereRaw(
+                        "UPPER(LTRIM(RTRIM(CAST(tipo AS VARCHAR(10))))) = ?",
+                        [$group['order_type']],
+                    )->where(function ($codeQuery) use ($numericCodes, $textCodes): void {
+                        if (!empty($numericCodes)) {
+                            // Los enteros se insertan como literales validados, sin bindings.
+                            $codeQuery->whereIntegerInRaw(
+                                DB::raw('TRY_CONVERT(BIGINT, LTRIM(RTRIM(CAST(identificador AS VARCHAR(50)))))'),
+                                $numericCodes,
+                            );
+                        }
+
+                        if (!empty($textCodes)) {
+                            $method = !empty($numericCodes) ? 'orWhereIn' : 'whereIn';
+                            $codeQuery->{$method}(
+                                DB::raw('LTRIM(RTRIM(CAST(identificador AS VARCHAR(50))))'),
+                                $textCodes,
+                            );
+                        }
+                    });
                 });
             }
-        });
+        };
+
+        if ($include) {
+            $query->where($applyGroupedKeys);
+        } else {
+            $query->whereNot($applyGroupedKeys);
+        }
     }
 
     private function getPreApprovalsForOrders(array $orders): array

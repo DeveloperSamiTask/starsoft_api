@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exports\AreaOrdersExport;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\SupplierProductByAreaRequest;
 use App\Models\Area;
@@ -11,6 +12,7 @@ use App\Services\UserPermissionService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
+use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 
 class ReportController extends Controller
 {
@@ -160,6 +162,37 @@ class ReportController extends Controller
                 'error' => 'Error al generar el reporte',
                 'message' => config('app.debug') ? $e->getMessage() : null,
             ], 500);
+        }
+    }
+
+    public function exportAreaOrders(Request $request)
+    {
+        try {
+            $company = $this->permissionService->resolveAuthorizedCompany($request->input('company'));
+            $area = trim((string) $request->input('area'));
+            $date = (string) $request->input('date');
+            $type = $request->input('type');
+
+            if ($area === '' || $date === '') {
+                return response()->json(['error' => 'Área y rango de fechas son obligatorios.'], 422);
+            }
+
+            $rows = $this->reportService->getAreaOrdersForExport($company, $area, $date, $type);
+            $spreadsheet = AreaOrdersExport::create($rows->all(), $area);
+
+            return response()->streamDownload(function () use ($spreadsheet) {
+                (new Xlsx($spreadsheet))->save('php://output');
+            }, "reporte-area-{$company}-{$area}.xlsx", [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('Error en exportAreaOrders', [
+                'message' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->all(),
+            ]);
+
+            return response()->json(['error' => 'No se pudo exportar el reporte del área.'], 500);
         }
     }
 

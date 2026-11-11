@@ -17,6 +17,8 @@ use Illuminate\Support\Facades\Route;
 
 Route::group(['middleware' => ['auth:sanctum']], function () {
     Route::get('/purchase-orders', [OrdersApi::class, 'getOrders']);
+    Route::get('/purchase-orders/export', [OrdersApi::class, 'export']);
+    Route::get('/purchase-orders/export-with-details', [OrdersApi::class, 'exportWithDetails']);
     Route::post('/details-order', [OrdersApi::class, 'getOrder']);
     Route::post('/mark-as-read', [OrdersApi::class, 'markAsRead']);
     Route::post('/handle-approval', [OrdersApi::class, 'handleApproval']);
@@ -60,6 +62,7 @@ Route::group(['middleware' => ['auth:sanctum']], function () {
             Route::get('/suppliers', 'reportSuppliers');
             Route::get('/areas', 'reportAreas');
             Route::get('/products', 'reportSupplierProductsAreas');
+            Route::get('/products/export', 'exportAreaOrders');
             Route::get('/areas-by-orders', 'reportAreasByOrders');
             Route::get('/monthly', 'reportMonthlyExpenses');
         });

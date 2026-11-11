@@ -50,10 +50,14 @@ onMounted(async () => {
 
 const today = new Date()
 
-// Hace 6 días
-const sixDaysAgo = new Date()
+// Un mes atrás; se recalcula también al cambiar de empresa.
+const getDefaultDateRange = () => {
+  const oneMonthAgo = new Date(today)
 
-sixDaysAgo.setDate(today.getDate() - 6)
+  oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
+
+  return `${formatDate(oneMonthAgo)} a ${formatDate(today)}`
+}
 
 // Formatear en 'YYYY-MM-DD'
 function formatDate(date) {
@@ -64,8 +68,8 @@ function formatDate(date) {
   return `${year}-${month}-${day}`
 }
 
-// Rango: de hace 6 días a hoy
-const dateRange = ref(`${formatDate(sixDaysAgo)} a ${formatDate(today)}`)
+// Rango inicial: desde hoy hasta un mes atrás.
+const dateRange = ref(getDefaultDateRange())
 
 // End Date Range Picker
 
@@ -75,8 +79,9 @@ const status = availableStatuses.value
 // Data table options
 const itemsPerPage = ref(30)
 const page = ref(1)
-const sortBy = ref()
-const orderBy = ref()
+// Valores iniciales válidos para que la tabla no calcule dimensiones con undefined.
+const sortBy = ref('')
+const orderBy = ref('asc')
 const isDialogVisible = ref(false)
 const selectedItem = ref(null)
 const selectedRows = ref([])
@@ -119,9 +124,23 @@ const headers = [
 ]
 
 const searchQuery = ref("")
-const selectedStatus = ref(canApprove.value ? 'PREAPROBADA' : 'EMITIDA')
+// Sin estado seleccionado: la API devuelve todos los estados.
+const selectedStatus = ref(null)
 const selectedType = ref()
 const selectedSwitch = ref(false)
+const isExporting = ref(false)
+const isExportingWithDetails = ref(false)
+
+watch(selectedCompany, (newCompany, previousCompany) => {
+  if (newCompany === previousCompany) {
+    return
+  }
+
+  // Al cambiar de empresa se limpian los filtros dependientes.
+  selectedStatus.value = null
+  selectedArea.value = null
+  dateRange.value = getDefaultDateRange()
+})
 
 
 const { data: ocsData, execute: fetchOcs } = await useApi(
@@ -142,13 +161,91 @@ const { data: ocsData, execute: fetchOcs } = await useApi(
 )
 
 const updateOptions = options => {
-  page.value = options.page
-  sortBy.value = options.sortBy[0]?.key
-  orderBy.value = options.sortBy[0]?.order
+  page.value = Number(options.page) || 1
+
+  const activeSort = Array.isArray(options.sortBy) ? options.sortBy[0] : null
+
+  sortBy.value = activeSort?.key || ''
+  orderBy.value = activeSort?.order === 'desc' ? 'desc' : 'asc'
 }
 
-const ocs = computed(() => ocsData.value.ocs)
-const total = computed(() => ocsData.value.total)
+const exportOrders = async () => {
+  isExporting.value = true
+
+  try {
+    // Descarga todas las filas que coinciden con los filtros actuales.
+    const response = await $api.raw('/purchase-orders/export', {
+      method: 'GET',
+      query: {
+        q: searchQuery.value,
+        company: selectedCompany.value,
+        status: selectedStatus.value,
+        area: selectedArea.value,
+        date: dateRange.value,
+        ignoreDateFilter: selectedSwitch.value,
+        sortBy: sortBy.value,
+        orderBy: orderBy.value,
+      },
+      responseType: 'blob',
+    })
+
+    const blob = response._data
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+
+    link.href = url
+    link.download = 'ordenes-starcheck.xlsx'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+  } catch (error) {
+    console.error('Error exportando órdenes:', error)
+  } finally {
+    isExporting.value = false
+  }
+}
+
+const exportOrdersWithDetails = async () => {
+  isExportingWithDetails.value = true
+
+  try {
+    // Usa los mismos filtros de la tabla para generar el reporte por bloques de OC/OS.
+    const response = await $api.raw('/purchase-orders/export-with-details', {
+      method: 'GET',
+      query: {
+        q: searchQuery.value,
+        company: selectedCompany.value,
+        status: selectedStatus.value,
+        area: selectedArea.value,
+        date: dateRange.value,
+        ignoreDateFilter: selectedSwitch.value,
+        sortBy: sortBy.value,
+        orderBy: orderBy.value,
+      },
+      responseType: 'blob',
+    })
+
+    const blob = response._data
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+
+    link.href = url
+    link.download = 'ordenes-starcheck-con-detalle.xlsx'
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+  } catch (error) {
+    console.error('Error exportando órdenes con detalle:', error)
+  } finally {
+    isExportingWithDetails.value = false
+  }
+}
+
+// Evita que una respuesta 500 de la API rompa el renderizado de la pantalla.
+const ocs = computed(() => ocsData.value?.ocs ?? [])
+const total = computed(() => ocsData.value?.total ?? 0)
 
 const handleRowClick = item => {
   selectedItem.value = item
@@ -268,6 +365,24 @@ const showSnackbar = ({ message, color = 'success' }) => {
     <VDivider />
 
     <VCardText class="d-flex flex-wrap gap-4 align-center">
+      <VBtn
+        color="success"
+        prepend-icon="ri-file-excel-2-line"
+        :loading="isExporting"
+        :disabled="isExporting"
+        @click="exportOrders"
+      >
+        Exportar Excel
+      </VBtn>
+      <VBtn
+        color="primary"
+        prepend-icon="ri-file-list-3-line"
+        :loading="isExportingWithDetails"
+        :disabled="isExporting || isExportingWithDetails"
+        @click="exportOrdersWithDetails"
+      >
+        Excel con detalle
+      </VBtn>
       <VSpacer />
       <div class="d-flex align-center gap-4 flex-wrap">
         <div class="app-user-search-filter">
