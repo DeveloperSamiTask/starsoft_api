@@ -410,26 +410,44 @@ class OrdersApi extends Controller
 
                 $products = collect($starsoftOrder->products ?? [])
                     ->values()
-                    ->map(function ($product, int $index) use ($type): array {
+                    ->map(function ($product) use ($type): array {
                         $quantity = (float) ($product->OC_NCANTID ?? $product->OC_CANT ?? 0);
                         $unitPrice = (float) ($product->OC_NPREUNI ?? 0);
+                        $price = (float) ($product->OC_NTOTVEN ?? $product->OC_NPRENET ?? 0);
                         $discountPercent = (float) ($product->OC_NDSCPOR ?? 0);
+                        $total = (float) ($product->OC_NTOTNET ?? $product->OC_NPRENET ?? 0);
 
-                        // Mantiene la misma fórmula de total que muestra OCDetailDialog.vue.
-                        $lineTotal = $unitPrice * $quantity * (1 - ($discountPercent / 100));
+                        // Si la tabla no trae total neto, conserva la fórmula del modal como respaldo.
+                        if ($total === 0.0 && $unitPrice !== 0.0) {
+                            $total = $unitPrice * $quantity * (1 - ($discountPercent / 100));
+                        }
 
                         return [
+                            'product_code' => trim((string) ($product->OC_CCODIGO ?? $product->OC_CODSERVICIO ?? '')),
                             'description' => trim((string) ($product->OC_CDESREF ?? '')),
                             'unit' => $product->OC_CUNIDAD ?? ($type === 'OS' ? 'UND' : ''),
                             'quantity' => $quantity,
-                            'total' => round($lineTotal, 2),
+                            'unit_price' => $unitPrice,
+                            'price' => $price,
+                            'discount_percent' => $discountPercent,
+                            'total' => round($total, 2),
                         ];
                     })
                     ->all();
 
+                $requirementType = $type === 'OS' ? 'RS' : 'RQ';
+                $area = DB::connection('sqlsrv_' . $company)
+                    ->table('REQUISC as R')
+                    ->leftJoin('AREA as A', 'R.AREA', '=', 'A.AREA_CODIGO')
+                    ->select('A.AREA_DESCRIPCION as area_name')
+                    ->where('R.NROREQUI', $starsoftOrder->OC_CNRODOCREF)
+                    ->where('R.TIPOREQUI', $requirementType)
+                    ->first();
+
                 return [
                     ...$order,
                     'detail' => [
+                        'area_name' => trim((string) ($area->area_name ?? '')),
                         'supplier_ruc' => trim((string) ($starsoftOrder->OC_CCODPRO ?? '')),
                         'supplier_name' => trim((string) ($starsoftOrder->OC_CRAZSOC ?? '')),
                         'issue_date' => $starsoftOrder->OC_DFECDOC ?? '',
